@@ -5,8 +5,6 @@ import numpy as np
 import matplotlib
 # matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys
-import os
 from scipy.io import savemat
 from scipy.io import loadmat
 import timeit
@@ -15,7 +13,6 @@ import timeit
 from DensityIntegrationUncertaintyQuantification import Density_integration_Poisson_uncertainty
 from DensityIntegrationUncertaintyQuantification import Density_integration_WLS_uncertainty
 
-# import helper functions
 import loadmat_functions
 
 def plot_figures(X, Y, rho_x, rho_y, rho, sigma_rho):
@@ -211,7 +208,7 @@ def create_mask(nr, nc, Eval):
     return mask
 
 
-def load_displacements(filename, displacement_uncertainty_method):
+def load_displacements_correlation(filename, displacement_uncertainty_method):
     """
     Function to load the displacements from Prana processing
 
@@ -252,17 +249,151 @@ def load_displacements(filename, displacement_uncertainty_method):
     return X_pix, Y_pix, U, V, sigma_U, sigma_V, Eval
 
 
+def grid_PTV_velocity_uncertainty_2D(Xn, Yn, fluid_mask, xp, yp, up, vp, up_unc, vp_unc, N_avg=3, dist_epsilon=1e-6):
+  # This function maps the velocity and its uncertainty from PTV data (on unstructured particle locations) to
+  # a predefined Cartesian grid using inverse-distance based weighted average.
+  # Inputs:
+  # Xn, Yn: 2d array specifying the Cartesian grid.
+  # fluid_mask: 2d array of a binary mask specifying the flow region. The particle data will be interpolated only onto the grid points with fluid_mask==True
+  # xp, yp: 1d array of particle locations.
+  # up, vp: 1d array of particle velocity values.
+  # up_unc, vp_unc: 1d array of paticle velocity uncertainty (std).
+  # N_avg: the number of particle data points used to determine the velocity for each grid point.
+  # dist_epsilon: the minimum distance allowed for setting up the weights (to avoid signularity).
+  # Outputs: 
+  # Un, Vn: the 3d arrays of velocity on grid.
+  # Un_unc, Vn_unc: 3d arrays of velocity uncertainty on grid.
+  # Cov_u, Cov_v: the sparse matrices of covariance matrices of interpolated velocity.
+
+  Ny,Nx = np.shape(Xn)
+
+  j,i = np.where(fluid_mask==True)
+  Npts = len(j)
+  Np = len(xp)
+
+  # Setup the linear operator to map the p velocity to grid using inverse distance based average
+  Map_M = scysparse.csr_matrix((Npts,Np),dtype=np.float)
+  for ct_pt in range(Npts):
+    x_grid = Xn[j[ct_pt],i[ct_pt]]
+    y_grid = Yn[j[ct_pt],i[ct_pt]]    
+    # find closest particles for linear interpolation.
+    dist = ((xp - x_grid)**2 + (yp - y_grid)**2)**0.5
+    dist[dist<dist_epsilon] = dist_epsilon
+    close_arg = np.argsort(dist)[:N_avg]
+    inv_dist = 1.0 / dist[close_arg]
+    inv_dist_weight = inv_dist / np.sum(inv_dist)
+    for col in range(N_avg):
+      Map_M[ct_pt,close_arg[col]] = inv_dist_weight[col]
+  
+  # Peform the interpolation.
+  Un = np.zeros((Ny,Nx))
+  Vn = np.zeros((Ny,Nx))
+  
+  Un[j,i] = Map_M.dot(up)
+  Vn[j,i] = Map_M.dot(vp)
+  
+  # Perform the ucnertainty propagation.
+  Un_unc = np.zeros((Ny,Nx))
+  Cov_up = scysparse.diags(up_unc**2,format='csr',dtype=np.float)
+  Cov_u = Map_M * Cov_up * Map_M.transpose()
+  Un_unc[j,i] = Cov_u.diagonal()**0.5
+
+  Vn_unc = np.zeros((Ny,Nx))
+  Cov_vp = scysparse.diags(vp_unc**2,format='csr',dtype=np.float)
+  Cov_v = Map_M * Cov_vp * Map_M.transpose()
+  Vn_unc[j,i] = Cov_v.diagonal()**0.5
+
+  return Un, Vn, Un_unc, Vn_unc, Cov_u, Cov_v
+
+
+def load_displacements_tracking(filename, displacement_uncertainty_method='crlb', experimental_parameters):
+    """
+    Function to load displacments from tracking processing and interpolate them to a grid
+
+    Args:
+        filename (str): name of the file containing the displacements
+        displacement_uncertainty_method (str): uncertainty quantification method. defaults to crlb
+        experimental_parameters (dict): dictionary of all experimental parameters
+
+    Returns:
+        X_grid, Y_grid: co-ordinate grid (pix)
+        U_grid, V_grid: X, Y displacements (pix)
+        sigma_U_grid, sigma_V_grid: X, Y displacement uncertainties (pix)
+    """
+    # ----------------------------
+    # load and extract data
+    # ----------------------------
+
+    # load the data:
+    data = loadmat_functions.loadmat(filename)
+
+    # extract track info
+    X_track = data['tracks'][:, 0]
+    Y_track = data['tracks'][:, 2]
+    if validation:
+        U_track = data['tracks'][:, 15]
+        V_track = data['tracks'][:, 16]
+    else:
+        U_track = data['tracks'][:, 13]
+        V_track = data['tracks'][:, 14]
+
+    # extract uncertainties
+    if displacement_uncertainty_method == 'crlb':
+        sigma_U_track = data['uncertainty2D']['U_std']
+        sigma_V_track = data['uncertainty2D']['V_std']
+    else:
+        sigma_U_track = np.zeros_like(a=X_track)
+        sigma_V_track = np.zeros_like(a=X_track)
+
+    # ----------------------------
+    # identify extents
+    # ----------------------------
+    xmin = X_track.min()
+    xmax = X_track.max()
+    ymin = Y_track.min()
+    ymax = Y_track.max()
+
+    # ----------------------------
+    # interpolate tracks onto a regular grid
+    # ----------------------------
+    # calculate expected number of dots along x and y
+    num_dots_x = np.round((xmax - xmin + 1) / experimental_parameters['dot_spacing'])
+    num_dots_y = np.round((ymax - ymin + 1) / experimental_parameters['dot_spacing'])
+
+    # generaet 1D co-ordinate arrays
+    x_grid = np.linspace(start=np.ceil(xmin), stop=np.floor(xmax), num=num_dots_x)
+    y_grid = np.linspace(start=np.ceil(ymin), stop=np.floor(ymax), num=num_dots_y)
+
+    # generate 2D co-ordinate grid
+    [X_grid, Y_grid] = np.meshgrid(x_grid, y_grid)
+
+    # interpolate results onto a regular grid
+    U_grid, V_grid, sigma_U_grid, sigma_V_grid, Cov_u, Cov_v = grid_PTV_velocity_uncertainty_2D(X_grid, Y_grid,
+                    np.ones_like(X_grid), X_track, Y_track, U_track, V_track, sigma_U_track, sigma_V_track, N_avg=8)
+
+    # set nan elements to zero
+    U_grid[np.logical_not(np.isfinite(U_grid))] = 0.0
+    V_grid[np.logical_not(np.isfinite(V_grid))] = 0.0
+    sigma_U_grid[np.logical_not(np.isfinite(sigma_U_grid))] = 0.0
+    sigma_V_grid[np.logical_not(np.isfinite(sigma_V_grid))] = 0.0
+
+    return X_grid, Y_grid, U_grid, V_grid, sigma_U_grid, sigma_V_grid
+
+
 def main():
     
     # file containing displacements and uncertainties
     filename = 'sample-displacements.mat'
     
-    # set integration method ('p' for poisson or 'w' for wls)
-    density_integration_method = 'w'
-
-    # displacement uncertainty method
+    # displacement estimation method ('c' for correlation and 't' for tracking)
+    displacement_estimation_method = 'c'
+    
+    # displacement uncertainty method ('MC' for correlation and 'crlb' for tracking)
     displacement_uncertainty_method = 'MC'
 
+    # set integration method ('p' for poisson or 'w' for wls)
+    density_integration_method = 'w'
+    
     # -------------------------------------------------
     # experimental parameters for density integration
     # -------------------------------------------------
@@ -316,12 +447,20 @@ def main():
     # --------------------------
     # processing
     # --------------------------
-    # load displacements and uncertainties from file
-    X_pix, Y_pix, U, V, sigma_U, sigma_V, Eval = load_displacements(filename, displacement_uncertainty_method)
+    # load displacements and uncertainties from file        
+    if displacement_estimation_method == 'c':
+        # correlation
+        X_pix, Y_pix, U, V, sigma_U, sigma_V, Eval = load_displacements_correlation(filename, displacement_uncertainty_method)    
+    elif displacement_estimation_method == 't':
+        # tracking
+        X_pix, Y_pix, U, V, sigma_U, sigma_V = load_displacements_tracking(filename, displacement_uncertainty_method, experimental_parameters)    
 
-    # create mask array (1 for flow, 0 elsewhere)
-    mask = create_mask(X_pix.shape[0], X_pix.shape[1], Eval)
-    
+    # create mask array (1 for flow, 0 elsewhere) - only implemented for Correlation at the moment
+    if displacement_estimation_method == 'c':
+        mask = create_mask(X_pix.shape[0], X_pix.shape[1], Eval)
+    elif displacement_estimation_method == 't':        
+        mask = np.ones_like(a=U)
+
     # convert displacements to density gradients and co-ordinates to physical units 
     X, Y, rho_x, rho_y, sigma_rho_x, sigma_rho_y = convert_displacements_to_physical_units(X_pix, Y_pix, U, V, sigma_U, sigma_V, experimental_parameters, mask)
 
@@ -346,7 +485,7 @@ def main():
                                                             sigma_dirichlet=sigma_rho_dirichlet)
 
     # save the results to file
-    savemat(file_name='sample-result.mat', mdict={'X': X, 'Y': Y, 'rho': rho, 'sigma_rho': sigma_rho,
+    savemat(filename='sample-result.mat', mdict={'X': X, 'Y': Y, 'rho': rho, 'sigma_rho': sigma_rho,
                         'dirichlet_label': dirichlet_label, 'rho_dirichlet':rho_dirichlet, 'sigma_rho_dirichlet':sigma_rho_dirichlet
                         }, long_field_names=True)
 
