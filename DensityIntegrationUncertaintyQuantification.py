@@ -182,7 +182,6 @@ def Density_integration_Poisson_uncertainty(Xn,Yn,fluid_mask,grad_x,grad_y,diric
   return Pn_ex[1:-1,1:-1], sigma_Pn_ex[1:-1,1:-1]
 
 
-
 def Density_integration_WLS_uncertainty(Xn,Yn,fluid_mask,grad_x,grad_y,dirichlet_label,dirichlet_value,
     uncertainty_quantification=True, sigma_grad_x=None, sigma_grad_y=None, sigma_dirichlet=None):
   # Evaluate the density field from the gradient fields by solving the WLS system.
@@ -323,7 +322,6 @@ def Density_integration_WLS_uncertainty(Xn,Yn,fluid_mask,grad_x,grad_y,dirichlet
     sigma_Pn_ex[j,i] = Var_p_vect**0.5
 
   return Pn_WLS_ex[1:-1,1:-1], sigma_Pn_ex[1:-1,1:-1]
-
   
 
 def Density_integration_WLS_uncertainty_weighted_average(Xn,Yn,fluid_mask,grad_x,grad_y,dirichlet_label,dirichlet_value,
