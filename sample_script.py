@@ -160,8 +160,26 @@ def convert_displacements_to_physical_units(X_pix, Y_pix, U, V, sigma_U, sigma_V
     rho_y = calculate_gradients_from_displacements(V, experimental_parameters)
 
     # calculate density gradient uncertainty from displacement uncertainty (kg/m^4)
-    sigma_rho_x = calculate_gradients_from_displacements(sigma_U, experimental_parameters)
-    sigma_rho_y = calculate_gradients_from_displacements(sigma_V, experimental_parameters)
+    # sigma_rho_x = calculate_gradients_from_displacements(sigma_U, experimental_parameters)
+    # sigma_rho_y = calculate_gradients_from_displacements(sigma_V, experimental_parameters)
+
+    # calculate density gradient uncertainty from displacement uncertainty (kg/m^4)
+    factor_1 = experimental_parameters['pixel_pitch'] * \
+                  1 / (experimental_parameters['magnification'] * experimental_parameters['gladstone_dale'] *
+                       experimental_parameters['n_0'] * experimental_parameters['Z_D'])
+    
+    factor_2 = experimental_parameters['pixel_pitch'] * \
+             1 / (experimental_parameters['gladstone_dale'] *
+                  experimental_parameters['n_0'] * experimental_parameters['Z_D']) * \
+             1/experimental_parameters['magnification']**2 * experimental_parameters['sigma_M']
+
+    factor_3 = experimental_parameters['pixel_pitch'] * \
+             1 / (experimental_parameters['magnification'] * experimental_parameters['gladstone_dale'] *
+                  experimental_parameters['n_0']) * \
+             1/experimental_parameters['Z_D']**2 * experimental_parameters['sigma_Z_D']
+
+    sigma_rho_x = np.sqrt((sigma_U * factor_1)**2 + (U * factor_2)**2 + (U * factor_3)**2)
+    sigma_rho_y = np.sqrt((sigma_V * factor_1)**2 + (V * factor_2)**2 + (V * factor_3)**2)
 
     # --------------------------
     # enforce mask and ensure valid values for uncertainties
@@ -175,8 +193,8 @@ def convert_displacements_to_physical_units(X_pix, Y_pix, U, V, sigma_U, sigma_V
     sigma_rho_y[~np.isfinite(sigma_rho_y)] = 0.0
 
     # set zero values to a small non-zero number (OR WLS will blow up)
-    sigma_rho_x[sigma_rho_x == 0] = 1e-12 
-    sigma_rho_y[sigma_rho_y == 0] = 1e-12
+    sigma_rho_x[sigma_rho_x == 0] = 1e-8 
+    sigma_rho_y[sigma_rho_y == 0] = 1e-8
 
     return X, Y, rho_x, rho_y, sigma_rho_x, sigma_rho_y
 
@@ -231,8 +249,8 @@ def load_displacements_correlation(filename, displacement_uncertainty_method):
     Y_pix = data['Y'].astype('float')
 
     # extract displacements (sign conversion for the SAMPLE DATASET ONLY)
-    U = -data['U']
-    V = -data['V']
+    U = data['U']
+    V = data['V']
 
     # extract displacement uncertainties
     sigma_U = data['uncertainty2D'][displacement_uncertainty_method + 'x']
@@ -394,6 +412,9 @@ def main():
     # set integration method ('p' for poisson or 'w' for wls)
     density_integration_method = 'w'
     
+    # dataset type (syntehtic or experiment)
+    dataset_type = 'synthetic'
+
     # -------------------------------------------------
     # experimental parameters for density integration
     # -------------------------------------------------
@@ -440,6 +461,13 @@ def main():
     experimental_parameters['magnification'] = experimental_parameters['focal_length'] / (
     experimental_parameters['object_distance'] - experimental_parameters['focal_length'])
 
+    # uncertainty in magnification
+    experimental_parameters['sigma_M'] = 0.1
+
+    # uncertainty in Z_D (m)
+    experimental_parameters['sigma_Z_D'] = 1e-3
+
+
     # non-dimensional magnification of the mid-z-PLANE of the density gradient field
     experimental_parameters['magnification_grad'] = experimental_parameters['magnification'] \
                                                     * experimental_parameters['Z_B'] / experimental_parameters['Z_A']
@@ -454,6 +482,11 @@ def main():
     elif displacement_estimation_method == 't':
         # tracking
         X_pix, Y_pix, U, V, sigma_U, sigma_V = load_displacements_tracking(filename, displacement_uncertainty_method, experimental_parameters)    
+
+    # account for sign convention
+    if dataset_type == 'synthetic':
+        U *= -1
+        V *= -1
 
     # create mask array (1 for flow, 0 elsewhere) - only implemented for Correlation at the moment
     if displacement_estimation_method == 'c':
